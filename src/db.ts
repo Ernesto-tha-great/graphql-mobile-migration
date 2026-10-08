@@ -6,18 +6,16 @@ export interface OrderRow { id: string; customer_id: string; status: string; cre
 export interface OrderItemRow { id: string; order_id: string; product_id: string; qty: number }
 
 export interface DbOptions {
-  /** Simulated round trip per statement. A Postgres call in the same region is roughly 1 ms. */
+  /** Pretend every statement takes this long, like a round trip to a real database. */
   latencyMs?: number;
-  /** Max statements in flight at once, like a connection pool. */
+  /** How many statements can run at once, like a connection pool. */
   poolSize?: number;
-  orders?: number;
-  itemsPerOrder?: number;
 }
 
 /**
- * An in-memory SQLite database that counts every statement it runs. The count
- * is the number this whole project is about: it's how many trips to the
- * database one screen of the app costs.
+ * An in-memory SQLite database that counts every statement it runs. That count
+ * is the number this whole tutorial is about: how many trips to the database
+ * one screen of the app costs.
  */
 export class Db {
   statements = 0;
@@ -26,19 +24,15 @@ export class Db {
   private readonly waiting: Array<() => void> = [];
 
   constructor(private readonly options: DbOptions = {}) {
-    seed(this.sqlite, options.orders ?? 100, options.itemsPerOrder ?? 3);
+    seed(this.sqlite);
   }
 
   all<T>(sql: string, ...params: SQLInputValue[]): Promise<T[]> {
     return this.run(() => this.sqlite.prepare(sql).all(...params) as T[]);
   }
 
-  async get<T>(sql: string, ...params: SQLInputValue[]): Promise<T | undefined> {
+  get<T>(sql: string, ...params: SQLInputValue[]): Promise<T | undefined> {
     return this.run(() => this.sqlite.prepare(sql).get(...params) as T | undefined);
-  }
-
-  resetCount(): void {
-    this.statements = 0;
   }
 
   private async run<T>(query: () => T): Promise<T> {
@@ -48,29 +42,22 @@ export class Db {
       if (this.options.latencyMs) await new Promise((resolve) => setTimeout(resolve, this.options.latencyMs));
       return query();
     } finally {
-      this.release();
+      this.active--;
+      this.waiting.shift()?.();
     }
   }
 
   private acquire(): Promise<void> {
-    const limit = this.options.poolSize ?? Infinity;
-    if (this.active < limit) {
+    if (this.active < (this.options.poolSize ?? Infinity)) {
       this.active++;
       return Promise.resolve();
     }
     return new Promise((resolve) => this.waiting.push(() => { this.active++; resolve(); }));
   }
-
-  private release(): void {
-    this.active--;
-    this.waiting.shift()?.();
-  }
 }
 
-const ADJECTIVES = ['Organic', 'Roasted', 'Wireless', 'Recycled', 'Classic', 'Compact', 'Smoked', 'Linen'];
-const NOUNS = ['coffee beans', 'headphones', 'notebook', 'tote bag', 'desk lamp'];
-
-function seed(db: DatabaseSync, orderCount: number, itemsPerOrder: number): void {
+/** One customer, 40 products, 100 orders with 3 items each. */
+function seed(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE customers (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL);
     CREATE TABLE products (id TEXT PRIMARY KEY, name TEXT NOT NULL, price_cents INTEGER NOT NULL);
@@ -79,24 +66,18 @@ function seed(db: DatabaseSync, orderCount: number, itemsPerOrder: number): void
     CREATE INDEX orders_by_customer ON orders (customer_id, created_at DESC, id DESC);
     CREATE INDEX items_by_order ON order_items (order_id);
   `);
-
   db.prepare('INSERT INTO customers VALUES (?, ?, ?)').run('c_1', 'Amara Okafor', 'amara@example.com');
 
+  const names = ['Roasted coffee beans', 'Wireless headphones', 'Linen notebook', 'Recycled tote bag', 'Desk lamp'];
   const product = db.prepare('INSERT INTO products VALUES (?, ?, ?)');
-  for (let i = 1; i <= 40; i++) {
-    const name = `${ADJECTIVES[i % ADJECTIVES.length]} ${NOUNS[i % NOUNS.length]}`;
-    product.run(`p_${i}`, name, 499 + ((i * 731) % 9000));
-  }
+  for (let i = 1; i <= 40; i++) product.run(`p_${i}`, `${names[i % names.length]} #${i}`, 499 + ((i * 731) % 9000));
 
   const statuses = ['delivered', 'shipped', 'paid', 'pending', 'cancelled'];
   const order = db.prepare('INSERT INTO orders VALUES (?, ?, ?, ?)');
   const item = db.prepare('INSERT INTO order_items VALUES (?, ?, ?, ?)');
   const start = Date.UTC(2026, 8, 30, 12, 0, 0);
-  for (let o = 1; o <= orderCount; o++) {
-    const createdAt = new Date(start - o * 7 * 3_600_000).toISOString();
-    order.run(`o_${o}`, 'c_1', statuses[o % statuses.length]!, createdAt);
-    for (let j = 1; j <= itemsPerOrder; j++) {
-      item.run(`i_${o}_${j}`, `o_${o}`, `p_${((o * 7 + j * 3) % 40) + 1}`, 1 + ((o + j) % 3));
-    }
+  for (let o = 1; o <= 100; o++) {
+    order.run(`o_${o}`, 'c_1', statuses[o % statuses.length]!, new Date(start - o * 7 * 3_600_000).toISOString());
+    for (let j = 1; j <= 3; j++) item.run(`i_${o}_${j}`, `o_${o}`, `p_${((o * 7 + j * 3) % 40) + 1}`, 1 + ((o + j) % 3));
   }
 }
